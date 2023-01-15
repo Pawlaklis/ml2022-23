@@ -1,25 +1,31 @@
-import gymnasium as gym
+import math
+
+import gym
 import pygame
-from gymnasium import spaces
 import numpy as np
+from gym.vector.utils import spaces
 
 
 class game2048Env(gym.Env):
-    metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 4}
+    metadata = {"render_modes": ["human", "rgb_array", "ansi"], "render_fps": 4}
 
     def __init__(self, render_mode=None, size=4):
+        super(game2048Env, self).__init__()
         self.size = size
         self.window_size = 512
 
-        self.observation_space = spaces.Box(low=2,
-                                            high=2 ** 32,
-                                            shape=(self.size, self.size),
-                                            dtype=np.int64)
+        self.observation_shape = (size, size)
+        self.observation_space = spaces.Box(low=np.zeros(self.observation_shape),
+                                            high=np.ones(self.observation_shape),
+                                            dtype=np.float64)
 
         self.action_space = spaces.Discrete(4)
 
         self.board = None
-        self.np_random = None
+        # self.np_random = np.random
+        self.reward_type = 0
+        self.sum_of_merges = 0
+        self.nr_of_moved_squeres = 0
 
         assert render_mode is None or render_mode in self.metadata["render_modes"]
         self.render_mode = render_mode
@@ -27,14 +33,24 @@ class game2048Env(gym.Env):
         self.window = None
         self.clock = None
 
+    def set_reward_type(self, reward_type=0):
+        self.reward_type = reward_type
+
     def _get_obs(self):
-        return self.board
+        return self.board / (2 ** 11)
 
     def _get_reward(self):
-        return np.max(self.board)
+        if self.reward_type == 0:
+            return np.sum(self.board) / 4096
+        if self.reward_type == 1:
+            return np.max(self.board) / 4096
+        if self.reward_type == 2:
+            return self.sum_of_merges
+        if self.reward_type == 3:
+            return self.sum_of_merges - self.nr_of_moved_squeres
 
-    def reset(self, seed=None, options=None):
-        self.np_random = np.random.seed(seed)
+    def reset(self, seed=None):
+        # self.np_random = np.random.seed(0)
 
         self.board = np.zeros((self.size, self.size), dtype=np.int64)
         self._place_random_tiles(count=2)
@@ -44,11 +60,14 @@ class game2048Env(gym.Env):
         if self.render_mode == "human":
             self._render_frame()
 
-        return observation, {}
+        return observation
 
     def step(self, action):
+        self.sum_of_merges = 0
+        self.nr_of_moved_squeres = 0
 
-        self.slide(action)
+
+        nr_of_merges = self.slide(action)
 
         terminated = self.is_done()
 
@@ -61,11 +80,19 @@ class game2048Env(gym.Env):
         if self.render_mode == "human":
             self._render_frame()
 
-        return observation, reward, terminated, False, {}
+        return observation, reward, terminated, {"board": self.board, "reward": self._get_reward()}
 
-    def render(self):
+    def render(self, mode="rgb_array"):
+        if mode == "human":
+            self.render_mode = "human"
+            return self._render_frame()
         if self.render_mode == "rgb_array":
             return self._render_frame()
+        if self.render_mode == "ansi":
+            s = 'Score: {}\n'.format(self._get_reward())
+            grid = np.array(self.board)
+            s += "{}\n".format(grid)
+            return s
 
     def _render_frame(self):
         if self.window is None and self.render_mode == "human":
@@ -90,13 +117,16 @@ class game2048Env(gym.Env):
         for x in range(self.size):
             for y in range(self.size):
                 if self.board[x, y] != 0:
+                    color_scale = math.log2(self.board[x, y])
+                    color_scale_bounded = max(0, int(255 - 255*color_scale/10))
+                    color = (color_scale_bounded, color_scale_bounded, 0)
                     pygame.draw.rect(
                         canvas,
-                        (255 - self.board[x, y] / 2048 * 255, 255 - self.board[x, y] / 2048 * 255, 0),
+                        color,
                         pygame.Rect(x * pix_square_size, y * pix_square_size, pix_square_size, pix_square_size))
                     self.font.render_to(canvas, (
-                    x * pix_square_size + pix_square_size / 3, y * pix_square_size + pix_square_size / 3),
-                                        str(self.board[x, y]), (0, 0, 0), size=pix_square_size/3)
+                        x * pix_square_size + pix_square_size / 3, y * pix_square_size + pix_square_size / 3),
+                                        str(self.board[x, y]), (255, 255, 255), size=pix_square_size / 3)
 
         if self.render_mode == "human":
             self.window.blit(canvas, canvas.get_rect())
@@ -116,11 +146,11 @@ class game2048Env(gym.Env):
 
     def _place_random_tiles(self, count):
         for _ in range(count):
-            a = self.np_random.integers(3, size=1)
-            b = self.np_random.integers(3, size=1)
+            a = np.random.randint(self.size, size=1)
+            b = np.random.randint(self.size, size=1)
             while self.board[a, b] != 0:
-                a = self.np_random.integers(3, size=1)
-                b = self.np_random.integers(3, size=1)
+                a = np.random.randint(self.size, size=1)
+                b = np.random.randint(self.size, size=1)
 
             # if sum([cell for row in self.board for cell in row]) in (0, 2):
             self.board[a, b] = 2
@@ -128,16 +158,14 @@ class game2048Env(gym.Env):
             #     self.board[a][b] = self.board.choice((2, 4))
 
     def slide(self, action):
-        changed = False
         self.board = np.rot90(self.board, action)
-        changed, self.board = self.slide_down(self.board) or changed
-        changed, self.board = self.merge_down(self.board) or changed
-        changed, self.board = self.slide_down(self.board) or changed
+        self.board = self.slide_down(self.board)
+        nr_of_merges, self.board = self.merge_down(self.board)
+        self.board = self.slide_down(self.board)
         self.board = np.rot90(self.board, 4 - action)
-        return changed, 0
+        return nr_of_merges
 
     def slide_down(self, board):
-        changed = False
         for x in range(self.size):
             for y in range(self.size - 2, -1, -1):
                 if board[y, x] == 0:
@@ -149,12 +177,12 @@ class game2048Env(gym.Env):
                 if next_y != y:
                     board[next_y, x] = board[y, x]
                     board[y, x] = 0
-                    changed = True
+                    self.nr_of_moved_squeres += 1
 
-        return changed, board
+        return board
 
     def merge_down(self, board):
-        changed = False
+        nr_of_merges = 0
         for x in range(self.size):
             for y in range(self.size - 2, -1, -1):
                 if board[y, x] == 0:
@@ -163,22 +191,10 @@ class game2048Env(gym.Env):
                 if board[y + 1, x] != 0 and board[y + 1, x] == board[y, x]:
                     board[y + 1, x] = board[y, x] * 2
                     board[y, x] = 0
-                    changed = True
-        return changed, board
+                    nr_of_merges += 1
+                    self.sum_of_merges += board[y, x] * 2
+
+        return nr_of_merges, board
 
     def is_done(self):
-        copy_board = self.board.copy()
-
-        if not self.board.all():
-            return False
-
-        for action in [0, 1, 2, 3]:
-            rotated_obs = np.rot90(copy_board, k=action)
-            _, updated_obs = self.slide_down(rotated_obs)
-            _, updated_obs = self.merge_down(rotated_obs)
-            _, updated_obs = self.slide_down(rotated_obs)
-
-        if not updated_obs.all():
-            return False
-
-        return True
+        return bool(self.board.all())
