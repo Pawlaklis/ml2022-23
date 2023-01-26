@@ -9,7 +9,7 @@ from gym.vector.utils import spaces
 class game2048Env(gym.Env):
     metadata = {"render_modes": ["human", "rgb_array", "ansi"], "render_fps": 4}
 
-    def __init__(self, reward_type=0, render_mode=None, observation_mode=1, size=4):
+    def __init__(self, reward_type=5, render_mode=None, observation_mode=1, death_on_illeagl_moves=False, size=4):
         super(game2048Env, self).__init__()
         self.size = size
         self.window_size = 512
@@ -25,15 +25,14 @@ class game2048Env(gym.Env):
             self.observation_shape = (size, size, 16)
             self.observation_space = spaces.Box(0, 1, self.observation_shape, dtype=int)
 
-
         self.action_space = spaces.Discrete(4)
 
         self.board = None
-        # self.np_random = np.random
         self.reward_type = reward_type
         self.sum_of_merges = 0
         self.nr_of_moved_squares = 0
         self.nr_of_steps = 0
+        self.death_on_illeagl_moves = death_on_illeagl_moves
 
         assert render_mode is None or render_mode in self.metadata["render_modes"]
         self.render_mode = render_mode
@@ -50,21 +49,18 @@ class game2048Env(gym.Env):
         if self.observation_mode == 1:
             representation = 2 ** (np.arange(layers, dtype=int) + 1)
 
-            # layered is the flat board repeated layers times
             layered = np.repeat(self.board[:, :, np.newaxis], layers, axis=-1)
 
-            # Now set the values in the board to 1 or zero depending whether they match representation.
-            # Representation is broadcast across a number of axes
             layered = np.where(layered == representation, 1, 0)
             return layered
 
-    def _get_reward(self):
-        if np.max(self.board) == 2048:
-            return float( 2 ** 14)
+    def _get_reward(self, board_copy):
+        if np.max(board_copy) == 2048:
+            return float(2 ** 14)
         if self.reward_type == 0:
-            return np.sum(self.board) / 4096
+            return np.sum(board_copy) / 4096
         if self.reward_type == 1:
-            return np.max(self.board) / 4096
+            return np.max(board_copy) / 4096
         if self.reward_type == 2:
             return self.nr_of_steps
         if self.reward_type == 3:
@@ -77,9 +73,7 @@ class game2048Env(gym.Env):
             return self.nr_of_moved_squares
 
     def reset(self):
-        # self.np_random = np.random.seed(0)
         self.nr_of_steps = 0
-
 
         self.board = np.zeros((self.size, self.size), dtype=np.int64)
         self._place_random_tiles(count=2)
@@ -98,26 +92,32 @@ class game2048Env(gym.Env):
 
         board_copy = self.slide(action)
 
-        reward = self._get_reward()
+        reward = self._get_reward(board_copy)
         terminated = self.is_done()
 
         if not terminated:
             if np.array_equal(board_copy, self.board):
-                reward = float(- 2 ** 14)
-                terminated = True
-                if np.max(self.board) == 2048:
-                    reward = float( 2 ** 14)
+                if self.death_on_illeagl_moves:
+                    reward = float(- 2 ** 14)
+                    terminated = True
+                else:
+                    self.nr_of_steps -= 1
+                    reward = -32
             self.board = board_copy
 
-            if not terminated:
-                self._place_random_tiles(count=1)
+        if np.max(self.board) == 2048:
+            terminated = True
+            reward = float(2 ** 14)
+
+        if not terminated:
+            self._place_random_tiles(count=1)
 
         observation = self._get_obs()
 
         if self.render_mode == "human":
             self._render_frame()
 
-        return observation, reward, terminated, {"board": self.board, "reward": self._get_reward(),
+        return observation, reward, terminated, {"board": self.board, "reward": self._get_reward(self.board),
                                                  "highest_tile": np.max(self.board)}
 
     def render(self, mode="rgb_array"):
